@@ -83,6 +83,17 @@ func (pt *Trie) CoveredNetworks(network netip.Prefix) []netip.Prefix {
 	return pt.coveredNetworks(network)
 }
 
+// WalkFunc is the type of the function called for each network visited by Walk methods.
+type WalkFunc func(network netip.Prefix, value any) error
+
+// CoveredNetworksWalk walks networks contained within the given network, calling walkFn.
+//
+// Note: Inserted addresses are normalized to IPv6, so the returned list will be IPv6 only.
+func (pt *Trie) CoveredNetworksWalk(network netip.Prefix, walkFn WalkFunc) error {
+	network = normalizePrefix(network)
+	return pt.coveredNetworksWalk(network, walkFn)
+}
+
 // String returns string representation of trie.
 //
 // The result will contain implicit nodes which exist as parents for multiple entries, but can be distinguished by the
@@ -195,6 +206,19 @@ func (pt *Trie) coveredNetworks(network netip.Prefix) []netip.Prefix {
 		}
 	}
 	return results
+}
+
+func (pt *Trie) coveredNetworksWalk(network netip.Prefix, walkFn WalkFunc) error {
+	if network.Bits() <= pt.network.Bits() && network.Contains(pt.network.Addr()) {
+		return pt.walkDepthFunc(walkFn)
+	} else if pt.network.Bits() < 128 {
+		bit := pt.discriminatorBitFromIP(network.Addr())
+		child := pt.children[bit]
+		if child != nil {
+			return child.coveredNetworksWalk(network, walkFn)
+		}
+	}
+	return nil
 }
 
 // This is an unsafe, but faster version of netip.Prefix.Contains
@@ -378,6 +402,24 @@ func (pt *Trie) walkDepth() <-chan netip.Prefix {
 	return entries
 }
 
+// walkDepthFunc walks the trie in depth order, calling walkFn for each network.
+func (pt *Trie) walkDepthFunc(walkFn WalkFunc) error {
+	if pt.value != nil {
+		if err := walkFn(pt.network, pt.value); err != nil {
+			return err
+		}
+	}
+	for _, trie := range pt.children {
+		if trie == nil {
+			continue
+		}
+		if err := trie.walkDepthFunc(walkFn); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // TrieLoader can be used to improve the performance of bulk inserts to a Trie. It caches the node of the
 // last insert in the tree, using it as the starting point to start searching for the location of the next insert. This
 // is highly beneficial when the addresses are pre-sorted.
@@ -452,6 +494,7 @@ func unempty(v any) any {
 func addr128(addr netip.Addr) uint128 {
 	return *(*uint128)(unsafe.Pointer(&addr))
 }
+
 func init() {
 	// Accessing the underlying data of a `netip.Addr` relies upon the data being
 	// in a known format, which is not guaranteed to be stable. So this init()

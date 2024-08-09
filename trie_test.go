@@ -2,6 +2,7 @@ package iptrie
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net/netip"
@@ -405,6 +406,9 @@ type coveredNetworkTest struct {
 	inserts  []string
 	search   string
 	networks []string
+	walk     []string
+	stopWalk string
+	error    bool
 	name     string
 }
 
@@ -413,36 +417,54 @@ var coveredNetworkTests = []coveredNetworkTest{
 		[]string{"192.168.0.0/24"},
 		"192.168.0.0/16",
 		[]string{"192.168.0.0/24"},
+		[]string{"192.168.0.0/24"},
+		"",
+		false,
 		"basic covered networks",
 	},
 	{
 		[]string{"192.168.0.0/24"},
 		"10.1.0.0/16",
 		nil,
+		nil,
+		"",
+		false,
 		"nothing",
 	},
 	{
 		[]string{"192.168.0.0/24", "192.168.0.0/25"},
 		"192.168.0.0/16",
 		[]string{"192.168.0.0/24", "192.168.0.0/25"},
+		[]string{"192.168.0.0/24", "192.168.0.0/25"},
+		"192.168.1.0/25",
+		false,
 		"multiple networks",
 	},
 	{
 		[]string{"192.168.0.0/24", "192.168.0.0/25", "192.168.0.1/32"},
 		"192.168.0.0/16",
 		[]string{"192.168.0.0/24", "192.168.0.0/25", "192.168.0.1/32"},
+		[]string{"192.168.0.0/24", "192.168.0.0/25"},
+		"192.168.0.0/25",
+		true,
 		"multiple networks 2",
 	},
 	{
 		[]string{"192.168.1.1/32"},
 		"192.168.0.0/16",
 		[]string{"192.168.1.1/32"},
+		[]string{"192.168.1.1/32"},
+		"",
+		false,
 		"leaf",
 	},
 	{
 		[]string{"0.0.0.0/0", "192.168.1.1/32"},
 		"192.168.0.0/16",
 		[]string{"192.168.1.1/32"},
+		[]string{"192.168.1.1/32"},
+		"",
+		false,
 		"leaf with root",
 	},
 	{
@@ -452,7 +474,22 @@ var coveredNetworkTests = []coveredNetworkTest{
 		},
 		"192.168.0.0/16",
 		[]string{"192.168.0.0/24", "192.168.1.1/32"},
+		[]string{"192.168.0.0/24", "192.168.1.1/32"},
+		"10.1.0.0/16",
+		false,
 		"path not taken",
+	},
+	{
+		[]string{
+			"0.0.0.0/0", "192.168.0.0/24", "192.168.1.1/32",
+			"10.1.0.0/16", "10.1.1.0/24", "192.168.2.2/32",
+		},
+		"192.168.0.0/16",
+		[]string{"192.168.0.0/24", "192.168.1.1/32", "192.168.2.2/32"},
+		[]string{"192.168.0.0/24", "192.168.1.1/32"},
+		"192.168.1.1/32",
+		true,
+		"path not taken and stopped",
 	},
 	{
 		[]string{
@@ -460,6 +497,9 @@ var coveredNetworkTests = []coveredNetworkTest{
 		},
 		"192.168.0.0/16",
 		nil,
+		nil,
+		"",
+		false,
 		"only masks different",
 	},
 }
@@ -481,6 +521,40 @@ func TestTrieCoveredNetworks(t *testing.T) {
 			snet := netip.MustParsePrefix(tc.search)
 			networks := trie.CoveredNetworks(snet)
 			assert.Equal(t, expectedEntries, networks)
+		})
+	}
+}
+
+func TestTrieCoveredNetworksWalk(t *testing.T) {
+	for _, tc := range coveredNetworkTests {
+		t.Run(tc.name, func(t *testing.T) {
+			trie := NewTrie()
+			for _, insert := range tc.inserts {
+				network := netip.MustParsePrefix(insert)
+				v := any(insert)
+				trie.Insert(network, v)
+			}
+			var expectedEntries []netip.Prefix
+			for _, network := range tc.walk {
+				expected := normalizePrefix(netip.MustParsePrefix(network))
+				expectedEntries = append(expectedEntries, expected)
+			}
+			snet := netip.MustParsePrefix(tc.search)
+			var networks []netip.Prefix
+			walkFn := func(network netip.Prefix, v any) error {
+				networks = append(networks, network)
+				if stopWalk := v.(string); stopWalk == tc.stopWalk {
+					return errors.New(stopWalk)
+				}
+				return nil
+			}
+			err := trie.CoveredNetworksWalk(snet, walkFn)
+			assert.Equal(t, expectedEntries, networks)
+			if tc.error {
+				assert.EqualError(t, err, tc.stopWalk)
+			} else {
+				assert.Nil(t, err)
+			}
 		})
 	}
 }
